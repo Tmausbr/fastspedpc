@@ -1,0 +1,33 @@
+name: Build WinOpti
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compilar (release)
+        run: cargo build --release --locked
+
+      - name: Publicar executavel como artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: WinOpti
+          path: target/release/winopti.exe
+
+      - name: Criar release (somente em tags v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/winopti.exe
+          generate_release_notes: true
