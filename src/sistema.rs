@@ -22,6 +22,9 @@ pub struct Shared {
     pub varrendo: AtomicBool,
     pub varredura: Mutex<Option<Varredura>>,
     pub mudou: AtomicBool,
+    pub diagnosticando: AtomicBool,
+    pub diag: Mutex<Option<crate::diagnostico::Diagnostico>>,
+    pub etapa: Mutex<String>,
 }
 
 impl Shared {
@@ -233,7 +236,7 @@ fn alvo_reabrir(exe: &str) -> String {
 }
 
 // ============================================================ energia
-fn achar_guid(s: &str) -> Option<String> {
+pub fn achar_guid(s: &str) -> Option<String> {
     let b = s.as_bytes();
     for i in 0..b.len().saturating_sub(35) {
         let c = &s[i..i + 36];
@@ -271,7 +274,7 @@ pub fn plano_ativo() -> Option<String> {
 }
 
 // ============================================================ aplicar / restaurar
-pub fn aplicar(sh: Arc<Shared>, sel: Vec<bool>, extras: Vec<String>, perfil: String) {
+pub fn aplicar(sh: Arc<Shared>, sel: Vec<bool>, extras: Vec<String>, extras_serv: Vec<String>, perfil: String) {
     sh.ocupado.store(true, Ordering::SeqCst);
     let ram_antes = ram_livre_gb();
     sh.log(format!("=== Aplicando perfil {perfil} (temporário) ==="));
@@ -303,6 +306,18 @@ pub fn aplicar(sh: Arc<Shared>, sel: Vec<bool>, extras: Vec<String>, perfil: Str
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    // ---- servicos marcados no Diagnostico
+    for s in &extras_serv {
+        if svc_estado(s) == SvcEstado::Rodando {
+            if parar_servico(s) {
+                servicos.insert(s.clone());
+                sh.log(format!("[OK] Serviço parado (diagnóstico): {s}"));
+            } else {
+                sh.log(format!("[--] Não foi possível parar: {s}"));
             }
         }
     }
@@ -621,4 +636,28 @@ pub fn varrer(sh: Arc<Shared>) {
     v.economia_mb = ITENS.iter().zip(v.itens.iter()).filter(|(i, _)| i.gamer).map(|(_, s)| s.ram_mb).sum();
     *sh.varredura.lock().unwrap() = Some(v);
     sh.varrendo.store(false, Ordering::SeqCst);
+}
+
+/// Para um servico e registra no estado, para que "Restaurar" o inicie de novo.
+pub fn parar_servico_registrado(nome: &str) -> bool {
+    if svc_estado(nome) != SvcEstado::Rodando {
+        return true;
+    }
+    if !parar_servico(nome) {
+        return false;
+    }
+    let (anterior, _) = carregar_estado();
+    let mut est = anterior.unwrap_or_default();
+    if est.perfil.is_empty() {
+        est.perfil = "Diagnóstico".into();
+    }
+    est.boot = System::boot_time();
+    if est.inicio == 0 {
+        est.inicio = agora();
+    }
+    if !est.servicos.iter().any(|s| s == nome) {
+        est.servicos.push(nome.to_string());
+    }
+    salvar_estado(&est);
+    true
 }

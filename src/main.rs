@@ -2,12 +2,18 @@
 
 mod bat;
 mod catalogo;
+mod conhecidos;
+mod diagnostico;
 mod sistema;
+mod tela_diag;
+
+use tela_diag::cor_nota;
 
 use catalogo::*;
+use diagnostico::{Acao, Categoria, Diagnostico, Gravidade};
 use eframe::egui::{self, Align, Align2, Color32, FontId, Layout, Pos2, RichText, Rounding, Sense, Shape, Stroke, Vec2};
 use sistema::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -34,6 +40,7 @@ const TRILHO: Color32 = Color32::from_rgb(229, 233, 239);
 enum Tela {
     Inicio,
     Otimizacao,
+    Diagnostico,
     Varredura,
     Scripts,
     Atividade,
@@ -67,6 +74,12 @@ struct App {
     pasta_bat: PathBuf,
     msg_bat: Option<(bool, String)>,
     reabrir: bool,
+    extras_serv: BTreeSet<String>,
+    filtro_cat: Option<Categoria>,
+    mostrar_info: bool,
+    aba_diag: u8,
+    feitos: HashSet<String>,
+    msg_diag: Option<String>,
 }
 
 impl App {
@@ -110,6 +123,8 @@ impl App {
         }
         let sh2 = sh.clone();
         std::thread::spawn(move || varrer(sh2));
+        let sh3 = sh.clone();
+        std::thread::spawn(move || diagnostico::executar(sh3));
 
         let mut sys = System::new();
         sys.refresh_cpu_usage();
@@ -135,6 +150,12 @@ impl App {
             pasta_bat: bat::area_de_trabalho(),
             msg_bat: None,
             reabrir: true,
+            extras_serv: BTreeSet::new(),
+            filtro_cat: None,
+            mostrar_info: false,
+            aba_diag: 0,
+            feitos: HashSet::new(),
+            msg_diag: None,
         }
     }
 
@@ -196,9 +217,10 @@ impl App {
         let sh = self.sh.clone();
         let sel = self.sel.clone();
         let extras: Vec<String> = self.extras.iter().cloned().collect();
+        let extras_serv: Vec<String> = self.extras_serv.iter().cloned().collect();
         let nome = self.perfil.nome().to_string();
         self.tela = Tela::Atividade;
-        std::thread::spawn(move || aplicar(sh, sel, extras, nome));
+        std::thread::spawn(move || aplicar(sh, sel, extras, extras_serv, nome));
     }
 
     fn restaurar(&mut self) {
@@ -216,7 +238,7 @@ impl App {
 fn cartao<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
     egui::Frame::none()
         .fill(CARTAO)
-        .stroke(Stroke::new(1.0, BORDA))
+        .stroke(Stroke::new(1.0_f32, BORDA))
         .rounding(Rounding::same(12.0))
         .inner_margin(egui::Margin::same(18.0))
         .show(ui, |ui| {
@@ -262,10 +284,10 @@ fn medidor(ui: &mut egui::Ui, rotulo: &str, pct: f32, sub: &str, invertido: bool
         let c = rect.center();
         let p = ui.painter();
         let r = 40.0;
-        p.add(Shape::line(arco(c, r, 0.0, std::f32::consts::TAU), Stroke::new(9.0, TRILHO)));
+        p.add(Shape::line(arco(c, r, 0.0, std::f32::consts::TAU), Stroke::new(9.0_f32, TRILHO)));
         let a0 = -std::f32::consts::FRAC_PI_2;
         let frac = (pct / 100.0).clamp(0.0, 1.0).max(0.01);
-        p.add(Shape::line(arco(c, r, a0, a0 + std::f32::consts::TAU * frac), Stroke::new(9.0, cor)));
+        p.add(Shape::line(arco(c, r, a0, a0 + std::f32::consts::TAU * frac), Stroke::new(9.0_f32, cor)));
         p.text(c, Align2::CENTER_CENTER, format!("{:.0}%", pct), FontId::proportional(21.0), TEXTO);
         ui.label(RichText::new(palavra).size(15.0).strong().color(cor));
         ui.label(RichText::new(sub).size(12.0).color(SUAVE));
@@ -287,7 +309,7 @@ fn botao(ui: &mut egui::Ui, texto: &str, sub: &str, cor: Color32, largura: f32, 
         fill = if primario { Color32::from_rgb(150, 182, 230) } else { Color32::from_rgb(248, 249, 251) };
     }
     let p = ui.painter();
-    p.rect(rect, Rounding::same(9.0), fill, Stroke::new(1.0, if primario { fill } else if hover { AZUL } else { BORDA }));
+    p.rect(rect, Rounding::same(9.0), fill, Stroke::new(1.0_f32, if primario { fill } else if hover { AZUL } else { BORDA }));
     let g1 = p.layout_no_wrap(texto.to_string(), FontId::proportional(16.0), if habilitado { fg } else { SUAVE });
     let g2 = p.layout_no_wrap(
         sub.to_string(),
@@ -324,6 +346,7 @@ impl eframe::App for App {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.tela {
                 Tela::Inicio => self.tela_inicio(ui),
                 Tela::Otimizacao => self.tela_otimizacao(ui),
+                Tela::Diagnostico => self.tela_diagnostico(ui),
                 Tela::Varredura => self.tela_varredura(ui),
                 Tela::Scripts => self.tela_scripts(ui),
                 Tela::Atividade => self.tela_atividade(ui),
@@ -339,15 +362,15 @@ impl App {
         egui::SidePanel::left("nav")
             .exact_width(236.0)
             .resizable(false)
-            .frame(egui::Frame::none().fill(CARTAO).stroke(Stroke::new(1.0, BORDA)).inner_margin(egui::Margin::same(16.0)))
+            .frame(egui::Frame::none().fill(CARTAO).stroke(Stroke::new(1.0_f32, BORDA)).inner_margin(egui::Margin::same(16.0)))
             .show(ctx, |ui| {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(Vec2::splat(46.0), Sense::hover());
                     ui.painter().rect_filled(r, Rounding::same(11.0), AZUL);
                     let c = r.center() + Vec2::new(0.0, 4.0);
-                    ui.painter().add(Shape::line(arco(c, 14.0, std::f32::consts::PI, std::f32::consts::TAU), Stroke::new(3.0, Color32::WHITE)));
-                    ui.painter().line_segment([c, c + Vec2::new(8.0, -9.0)], Stroke::new(3.0, Color32::WHITE));
+                    ui.painter().add(Shape::line(arco(c, 14.0, std::f32::consts::PI, std::f32::consts::TAU), Stroke::new(3.0_f32, Color32::WHITE)));
+                    ui.painter().line_segment([c, c + Vec2::new(8.0, -9.0)], Stroke::new(3.0_f32, Color32::WHITE));
                     ui.vertical(|ui| {
                         ui.label(RichText::new("WinOpti").size(23.0).strong().color(TEXTO));
                         ui.label(RichText::new("Mais desempenho, sem\nmudar nada para sempre").size(11.5).color(SUAVE));
@@ -357,7 +380,8 @@ impl App {
                 let itens = [
                     (Tela::Inicio, "🏠  Início"),
                     (Tela::Otimizacao, "⚙  Serviços e Aplicativos"),
-                    (Tela::Varredura, "🔍  Varredura e Segurança"),
+                    (Tela::Diagnostico, "🔎  Diagnóstico (mapa)"),
+                    (Tela::Varredura, "⚡  Varredura rápida"),
                     (Tela::Scripts, "📄  Gerar Script (.bat)"),
                     (Tela::Atividade, "📋  Registro de Atividade"),
                     (Tela::Sobre, "ℹ  Como funciona"),
@@ -437,7 +461,7 @@ impl App {
                         if self.reiniciado { "O PC foi reiniciado e tudo voltou ao padrão.".into() } else { "Nenhuma alteração temporária ativa.".into() },
                     ),
                 };
-                egui::Frame::none().fill(bg).stroke(Stroke::new(1.0, fg.gamma_multiply(0.35))).rounding(Rounding::same(12.0)).inner_margin(egui::Margin::same(16.0)).show(ui, |ui| {
+                egui::Frame::none().fill(bg).stroke(Stroke::new(1.0_f32, fg.gamma_multiply(0.35))).rounding(Rounding::same(12.0)).inner_margin(egui::Margin::same(16.0)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.label(RichText::new(tit).size(16.0).strong().color(fg));
                     ui.label(RichText::new(txt).size(13.0).color(TEXTO));
@@ -482,28 +506,38 @@ impl App {
                 medidor(&mut c[1], "Uso de CPU", self.cpu, "agora", false);
                 medidor(&mut c[2], "Uso de Memória", self.ram, &self.ram_txt, false);
                 medidor(&mut c[3], "Disco C:", self.disco, &self.disco_txt, false);
-                let v = self.sh.varredura.lock().unwrap().clone();
+                let d = self.sh.diag.lock().unwrap().clone();
+                let rodando = self.sh.diagnosticando.load(Ordering::SeqCst);
                 c[4].vertical_centered(|ui| {
-                    let graves = v.as_ref().map(|v| v.alertas.iter().filter(|a| a.grave).count()).unwrap_or(0);
-                    let (cor, bg, t, s) = match &v {
-                        None => (SUAVE, TRILHO, "Verificando...", "Varredura em andamento".to_string()),
-                        Some(_) if graves > 0 => (VERMELHO, VERMELHO_CLARO, "Atenção", format!("{graves} alerta(s) de segurança")),
-                        Some(v) => (VERDE, VERDE_CLARO, "Sistema estável", format!("Nenhum minerador ou\nprocesso suspeito\n({} processos)", v.total_proc)),
-                    };
-                    egui::Frame::none().fill(bg).rounding(Rounding::same(12.0)).inner_margin(egui::Margin::same(12.0)).show(ui, |ui| {
-                        ui.set_min_height(150.0);
-                        ui.vertical_centered(|ui| {
-                            ui.label(RichText::new(if graves > 0 { "⚠" } else { "✔" }).size(34.0).color(cor));
-                            ui.label(RichText::new(t).size(15.0).strong().color(TEXTO));
-                            ui.label(RichText::new(s).size(12.0).color(SUAVE));
-                        });
-                    });
-                    if graves > 0 && ui.link("Ver detalhes").clicked() {
-                        self.tela = Tela::Varredura;
+                    ui.label(RichText::new("Saúde (mapa)").size(13.5).color(SUAVE));
+                    match &d {
+                        Some(d) if !rodando => {
+                            let (rect, _) = ui.allocate_exact_size(Vec2::new(110.0, 100.0), Sense::hover());
+                            let cor = cor_nota(d.nota);
+                            let p = ui.painter();
+                            p.add(Shape::line(arco(rect.center(), 40.0, 0.0, std::f32::consts::TAU), Stroke::new(9.0_f32, TRILHO)));
+                            let a0 = -std::f32::consts::FRAC_PI_2;
+                            p.add(Shape::line(arco(rect.center(), 40.0, a0, a0 + std::f32::consts::TAU * (d.nota as f32 / 100.0).max(0.01)), Stroke::new(9.0_f32, cor)));
+                            p.text(rect.center(), Align2::CENTER_CENTER, format!("{}", d.nota), FontId::proportional(24.0), TEXTO);
+                            let crit = d.contar(Gravidade::Critico);
+                            let alto = d.contar(Gravidade::Alto);
+                            ui.label(RichText::new(if crit > 0 { "Ameaças!" } else if alto > 0 { "Atenção" } else { "Bom" }).size(15.0).strong().color(cor));
+                            if ui.link(RichText::new(format!("{crit} críticos · {alto} altos")).size(12.0)).clicked() {
+                                self.tela = Tela::Diagnostico;
+                            }
+                        }
+                        _ => {
+                            ui.add_space(30.0);
+                            ui.spinner();
+                            ui.label(RichText::new("Mapeando...").size(14.0).strong().color(AZUL));
+                            ui.label(RichText::new(self.sh.etapa.lock().unwrap().clone()).size(11.5).color(SUAVE));
+                        }
                     }
                 });
             });
         });
+        ui.add_space(12.0);
+        self.cartao_mapa(ui);
         ui.add_space(12.0);
 
         cartao(ui, |ui| {
@@ -520,7 +554,7 @@ impl App {
                     let sel = self.perfil == *p;
                     let r = egui::Frame::none()
                         .fill(if sel { AZUL_CLARO } else { CARTAO })
-                        .stroke(Stroke::new(if sel { 2.0 } else { 1.0 }, if sel { AZUL } else { BORDA }))
+                        .stroke(Stroke::new(if sel { 2.0_f32 } else { 1.0 }, if sel { AZUL } else { BORDA }))
                         .rounding(Rounding::same(10.0))
                         .inner_margin(egui::Margin::same(12.0))
                         .show(ui, |ui| {
@@ -854,9 +888,23 @@ impl App {
             Confirmar::Aplicar => (
                 "Aplicar otimização?",
                 format!(
-                    "Perfil {}: {} itens serão pausados até reiniciar ou restaurar.\nSalve o que estiver aberto nos apps que serão fechados.",
+                    "Perfil {}: {} itens do catálogo{} serão pausados até reiniciar ou restaurar.\n{}\nSalve o que estiver aberto nos apps que serão fechados.",
                     self.perfil.nome(),
-                    self.sel.iter().filter(|s| **s).count()
+                    self.sel.iter().filter(|s| **s).count(),
+                    if self.extras.len() + self.extras_serv.len() > 0 {
+                        format!(" + {} item(ns) marcados no Diagnóstico", self.extras.len() + self.extras_serv.len())
+                    } else {
+                        String::new()
+                    },
+                    match self.sh.diag.lock().unwrap().as_ref() {
+                        Some(d) => format!(
+                            "Mapa: nota {} · {} críticos · {} altos. Ameaças (mineradores, adware) devem ser removidas, não só pausadas.",
+                            d.nota,
+                            d.contar(Gravidade::Critico),
+                            d.contar(Gravidade::Alto)
+                        ),
+                        None => "O mapa ainda não terminou. Recomendo esperar o Diagnóstico.".into(),
+                    }
                 ),
             ),
         };
@@ -866,7 +914,7 @@ impl App {
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-            .fixed_size([420.0, 140.0])
+            .fixed_size([480.0, 160.0])
             .show(ctx, |ui| {
                 ui.label(RichText::new(texto).size(14.0));
                 ui.add_space(10.0);
